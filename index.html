@@ -1125,6 +1125,25 @@ footer{background:var(--ink);color:#e9e4dc;padding:clamp(56px,8vh,90px) clamp(20
 
     bookedSet.add(selected);
     const pretty = new Date(selected+'T00:00:00').toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long',year:'numeric'});
+
+    // Email the booking to Ardian via Web3Forms (public access key; fire-and-forget).
+    // The booking is already safely stored in Supabase regardless of this email.
+    fetch('https://api.web3forms.com/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({
+        access_key: '2011aeca-270e-4664-aab5-a828fb021aff',
+        subject:   'New booking — ' + record.tour + ' (' + record.tour_date + ')',
+        from_name: 'Albania Private Tours',
+        Tour:   record.tour,
+        Date:   pretty,
+        Guests: String(record.people),
+        Name:   record.full_name,
+        Phone:  record.phone || 'not provided',
+        Email:  record.email || 'not provided'
+      })
+    }).catch(function(){});
+
     form.reset();
     form.classList.add('hidden');
     successMsg.textContent = `${record.tour} for ${record.people} guest(s) on ${pretty}. Ardian will confirm with you shortly — no prepayment needed. This date is now closed for all other bookings.`;
