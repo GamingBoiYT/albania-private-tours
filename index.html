@@ -895,6 +895,8 @@ footer{background:var(--ink);color:#e9e4dc;padding:clamp(56px,8vh,90px) clamp(20
   <span class="txt">Message Ardian</span>
 </a>
 
+<!-- Supabase client (stores bookings online + powers the global one-per-day lock) -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 /* ============================================================================
    1 · HERO PHOTO SLIDESHOW  (auto-advancing crossfade — normal page scroll)
@@ -993,25 +995,30 @@ footer{background:var(--ink);color:#e9e4dc;padding:clamp(56px,8vh,90px) clamp(20
 })();
 
 /* ============================================================================
-   3 · BOOKING CALENDAR  ·  one-tour-per-day global lock
+   3 · BOOKING CALENDAR  ·  one-tour-per-day GLOBAL lock (Supabase backend)
    ----------------------------------------------------------------------------
-   Booked dates are persisted in localStorage under a single key. Because every
-   tour is private, ANY booked date is blocked for EVERY tour — the calendar
-   greys it out for all subsequent visitors on this device/origin.
-
-   NOTE ON "GLOBAL": localStorage is per-browser. For a truly global lock shared
-   across all visitors you must swap `Store` below for a backend (e.g. Supabase,
-   Firebase, or a tiny serverless endpoint). The rest of the UI stays identical.
+   Bookings are stored online in Supabase. Because every tour is private, ANY
+   booked date is blocked for EVERY tour and EVERY visitor — the `tour_date`
+   primary key guarantees a single booking per day across the whole platform.
+   The public `booked_dates` view exposes only the dates (never guests' personal
+   details) so the calendar can grey them out safely.
    ========================================================================== */
 (function(){
-  const KEY = 'albania_booked_dates_v1';
+  /* --- Supabase connection (publishable key is safe in the browser; RLS-guarded) --- */
+  const SB_URL = 'https://ermogbzhzbhcicnykyex.supabase.co';
+  const SB_KEY = 'sb_publishable_501WdLkOdJ0L5l5cPsVB_A_HZC5u9SX';
+  const sb = window.supabase.createClient(SB_URL, SB_KEY);
 
-  /* --- Storage adapter (swap this object for a real backend) --- */
-  const Store = {
-    all(){ try{ return JSON.parse(localStorage.getItem(KEY)) || {}; }catch{ return {}; } },
-    isBooked(iso){ return !!this.all()[iso]; },
-    book(iso, record){ const a=this.all(); a[iso]=record; localStorage.setItem(KEY, JSON.stringify(a)); }
-  };
+  const bookedSet = new Set();     // ISO date strings already taken (cached for the calendar)
+  async function loadBooked(){
+    try{
+      const { data, error } = await sb.from('booked_dates').select('tour_date');
+      if(error) throw error;
+      bookedSet.clear();
+      (data || []).forEach(r => bookedSet.add(r.tour_date));
+    }catch(e){ console.warn('Could not load booked dates:', e); }
+  }
+  const isBookedISO = k => bookedSet.has(k);
 
   const iso = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
   const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -1055,7 +1062,7 @@ footer{background:var(--ink);color:#e9e4dc;padding:clamp(56px,8vh,90px) clamp(20
 
       const isPast   = date < today;
       const isToday  = date.getTime() === today.getTime();
-      const isBooked = Store.isBooked(key);
+      const isBooked = isBookedISO(key);
 
       if(isToday) cell.classList.add('today');
 
@@ -1082,27 +1089,45 @@ footer{background:var(--ink);color:#e9e4dc;padding:clamp(56px,8vh,90px) clamp(20
   prevBtn.addEventListener('click', ()=>{ view.setMonth(view.getMonth()-1); render(); });
   nextBtn.addEventListener('click', ()=>{ view.setMonth(view.getMonth()+1); render(); });
 
-  /* --- Submit: lock the date globally, then confirm --- */
-  form.addEventListener('submit', (e)=>{
+  /* --- Submit: write the booking to Supabase (the global one-per-day lock) --- */
+  form.addEventListener('submit', async (e)=>{
     e.preventDefault();
     if(!selected) return;
-    // Guard against a race — someone may have taken the date meanwhile
-    if(Store.isBooked(selected)){ alert('Sorry — that date was just booked. Please choose another.'); render(); return; }
+
+    const btn = form.querySelector('.submit-book');
+    const label = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Reserving…';
 
     const record = {
-      tour:   document.getElementById('fTour').value,
-      name:   document.getElementById('fName').value,
-      people: document.getElementById('fPeople').value,
-      email:  document.getElementById('fEmail').value,
-      phone:  document.getElementById('fPhone').value,
-      at:     new Date().toISOString()
+      tour_date: selected,
+      tour:      document.getElementById('fTour').value,
+      full_name: document.getElementById('fName').value,
+      people:    parseInt(document.getElementById('fPeople').value, 10),
+      email:     document.getElementById('fEmail').value,
+      phone:     document.getElementById('fPhone').value
     };
-    Store.book(selected, record);   // ← the global one-per-day lock
 
+    // insert() without .select() returns minimal — no read permission needed
+    const { error } = await sb.from('bookings').insert(record);
+
+    btn.disabled = false; btn.textContent = label;
+
+    if(error){
+      await loadBooked(); render();
+      if(error.code === '23505' || /duplicate|unique/i.test(error.message || '')){
+        alert('Sorry — that date was just booked by someone else. Please choose another.');
+      }else{
+        console.error('Booking failed:', error);
+        alert('Something went wrong saving your booking. Please try again, or message Ardian directly on WhatsApp.');
+      }
+      return;
+    }
+
+    bookedSet.add(selected);
     const pretty = new Date(selected+'T00:00:00').toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long',year:'numeric'});
     form.reset();
     form.classList.add('hidden');
-    successMsg.textContent = `${record.tour} for ${record.people} guest(s) on ${pretty}. We'll confirm by email shortly — no prepayment needed. This date is now closed for all other bookings.`;
+    successMsg.textContent = `${record.tour} for ${record.people} guest(s) on ${pretty}. Ardian will confirm with you shortly — no prepayment needed. This date is now closed for all other bookings.`;
     success.classList.add('show');
     selected = null;
     render();
@@ -1118,7 +1143,8 @@ footer{background:var(--ink);color:#e9e4dc;padding:clamp(56px,8vh,90px) clamp(20
     });
   });
 
-  render();
+  render();                      // draw the calendar immediately
+  loadBooked().then(render);     // then grey out any already-booked dates from Supabase
 })();
 </script>
 </body>
